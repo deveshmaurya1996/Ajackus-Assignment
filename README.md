@@ -107,13 +107,22 @@ curl -H "Authorization: Bearer <token>" http://localhost:8000/api/projects
 ### Tasks
 - `GET /api/projects/:id/tasks` — List tasks in a project; supports `?q=` search (authenticated)
 - `POST /api/projects/:id/tasks` — Create a task (admin or member)
-- `PATCH /api/tasks/:id` — Update a task (authenticated)
+- `PATCH /api/tasks/:id` — Update a task (admin or member; membership required)
 - `DELETE /api/tasks/:id` — Delete a task (admin or member)
+
+### Comments
+- `GET /api/tasks/:id/comments` — List comments chronologically (project members)
+- `POST /api/tasks/:id/comments` — Post a comment (admin or member; append-only)
+
+### Activity
+- `GET /api/projects/:id/activity` — Recent project activity, newest first (project members)
 
 ### Export
 - `POST /api/projects/:id/export` — Export tasks to Airtable (admin or member)
 
 ## Airtable Export (Part 3c)
+
+See [`AIRTABLE_SETUP.md`](AIRTABLE_SETUP.md) for creating the base, fields, and PAT scopes.
 
 Set these in your `.env` before running the export:
 
@@ -124,6 +133,13 @@ AIRTABLE_TABLE_NAME=Tasks
 ```
 
 The backend uses `pyairtable` for real API calls. `backend/projects/airtable_mock.py` is a test double — use it in unit tests, not in production code.
+
+## Assignment artifacts
+
+- [`REVIEW.md`](REVIEW.md) — code review with curl proof
+- [`DESIGN_NOTES.md`](DESIGN_NOTES.md) — activity transaction policy
+- [`TERMINAL_LOG.md`](TERMINAL_LOG.md) — setup / proof / demo log
+- [`RECORDING.md`](RECORDING.md) — Loom recording link
 
 ## Tech Stack
 
