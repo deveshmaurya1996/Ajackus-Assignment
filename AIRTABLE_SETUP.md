@@ -24,10 +24,11 @@ You can delete unused default columns (Notes, Attachments, etc.).
 ## 2. Create a Personal Access Token
 
 1. Open [Airtable Developer hub](https://airtable.com/create/tokens) → **Create new token**.
-2. Scopes:
+2. Scopes (all required for a clean setup):
    - `data.records:read`
    - `data.records:write`
    - `schema.bases:read`
+   - `schema.bases:write` (optional — lets tooling create columns; otherwise create columns manually in step 1)
 3. Access: add the **TaskBoard Export** base.
 4. Copy the token (`pat…`).
 

@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { apiFetch, setSession, type StoredUser } from "@/lib/api-client";
+import { apiFetch, clearSession, setSession, type StoredUser } from "@/lib/api-client";
 
 export default function RegisterPage() {
   const navigate = useNavigate();
@@ -15,6 +15,7 @@ export default function RegisterPage() {
     setError(null);
     setSubmitting(true);
     try {
+      clearSession();
       const data = await apiFetch<{ token: string; user: StoredUser }>("/api/auth/register", {
         method: "POST",
         body: JSON.stringify({ name, email, password }),

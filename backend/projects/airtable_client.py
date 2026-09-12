@@ -1,9 +1,4 @@
-"""Real Airtable export helper using pyairtable.
-
-Retries transient failures (429 / 5xx). Does not retry permanent 4xx.
-Per-record errors are collected; one failure does not abort the batch.
-Upserts by the `Task Id` field so re-exports update instead of duplicating.
-"""
+"""Airtable export via pyairtable: retry transient errors, per-record isolation, upsert by Task Id."""
 from __future__ import annotations
 
 import os
@@ -16,6 +11,24 @@ from pyairtable import Api
 TRANSIENT_STATUS = {429, 500, 502, 503, 504}
 MAX_RETRIES = 3
 BACKOFF_SECONDS = 0.5
+
+REQUIRED_FIELDS = (
+    'Task Id',
+    'Title',
+    'Description',
+    'Status',
+    'Assignee',
+    'Project Id',
+    'Position',
+)
+
+MISSING_SCHEMA_MSG = (
+    'Airtable table is missing required columns. In your Tasks table create these '
+    'exact field names: Task Id (single line text), Title (single line text), '
+    'Description (long text), Status (single line text), Assignee (single line text), '
+    'Project Id (single line text), Position (number). '
+    'Optional: add schema.bases:read and schema.bases:write to your PAT.'
+)
 
 
 class PermanentAirtableError(Exception):
@@ -39,7 +52,6 @@ def _is_transient(exc: Exception) -> bool:
     code = _status_code(exc)
     if code in TRANSIENT_STATUS:
         return True
-    # Network-ish failures without a status
     if code is None and not isinstance(exc, PermanentAirtableError):
         return isinstance(exc, (TimeoutError, ConnectionError, OSError))
     return False
@@ -50,7 +62,7 @@ def _call_with_retry(fn, *args, **kwargs):
     for attempt in range(MAX_RETRIES):
         try:
             return fn(*args, **kwargs)
-        except Exception as exc:  # noqa: BLE001 — classify below
+        except Exception as exc:
             last_exc = exc
             code = _status_code(exc)
             if code is not None and code < 500 and code != 429:
@@ -58,7 +70,7 @@ def _call_with_retry(fn, *args, **kwargs):
             if not _is_transient(exc) or attempt == MAX_RETRIES - 1:
                 raise
             time.sleep(BACKOFF_SECONDS * (2 ** attempt))
-    raise last_exc  # pragma: no cover
+    raise last_exc
 
 
 def _task_fields(task, project_id: str) -> dict[str, Any]:
@@ -73,6 +85,16 @@ def _task_fields(task, project_id: str) -> dict[str, Any]:
     }
 
 
+def assert_task_id_field(table) -> None:
+    try:
+        table.all(formula="{Task Id}='__taskboard_probe__'", max_records=1)
+    except Exception as exc:
+        text = str(exc).lower()
+        if 'unknown field' in text or 'invalid_filter_by_formula' in text:
+            raise PermanentAirtableError(MISSING_SCHEMA_MSG) from exc
+        raise PermanentAirtableError(str(exc)) from exc
+
+
 def get_table():
     api_key = os.environ.get('AIRTABLE_API_KEY') or ''
     base_id = os.environ.get('AIRTABLE_BASE_ID') or ''
@@ -83,7 +105,6 @@ def get_table():
 
 
 def upsert_task(table, task, project_id: str) -> str:
-    """Create or update one task. Returns 'created' or 'updated'."""
     fields = _task_fields(task, project_id)
     formula = f"{{Task Id}}='{task.id}'"
 
@@ -111,6 +132,8 @@ def export_tasks_to_airtable(tasks, project_id: str, table=None) -> dict[str, An
     if table is None:
         table = get_table()
 
+    assert_task_id_field(table)
+
     created = 0
     updated = 0
     failed = 0
@@ -123,7 +146,7 @@ def export_tasks_to_airtable(tasks, project_id: str, table=None) -> dict[str, An
                 created += 1
             else:
                 updated += 1
-        except Exception as exc:  # noqa: BLE001 — per-record isolation
+        except Exception as exc:
             failed += 1
             errors.append({'taskId': str(task.id), 'error': str(exc)})
 

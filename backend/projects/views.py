@@ -1,7 +1,8 @@
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
-from django.db import connection, transaction
+from django.db import transaction
+from django.db.models import Q
 from users.serializers import UserSerializer
 from .models import Project, Membership, Task, Comment, Activity
 from .serializers import (
@@ -10,7 +11,7 @@ from .serializers import (
     CommentSerializer,
     ActivitySerializer,
 )
-from .airtable_client import export_tasks_to_airtable
+from .airtable_client import PermanentAirtableError, export_tasks_to_airtable
 
 
 def _get_membership(user, project_id):
@@ -32,6 +33,16 @@ def _record_activity(*, project_id, actor, action, task=None, metadata=None):
         action=action,
         metadata=metadata or {},
     )
+
+
+def _resolve_assignee_id(project_id, assignee_id):
+    """Return (ok, value_or_error). value is None or a user id string."""
+    if assignee_id in (None, ''):
+        return True, None
+    if not Membership.objects.filter(project_id=project_id, user_id=assignee_id).exists():
+        return False, 'assignee must be a project member'
+    return True, assignee_id
+
 
 
 class ProjectListCreateView(APIView):
@@ -99,7 +110,10 @@ class ProjectDetailView(APIView):
         except Project.DoesNotExist:
             return Response({'error': 'not found'}, status=status.HTTP_404_NOT_FOUND)
         if 'name' in request.data:
-            project.name = request.data['name'].strip()
+            name = (request.data['name'] or '').strip()
+            if not name or len(name) > 120:
+                return Response({'error': 'invalid name'}, status=status.HTTP_400_BAD_REQUEST)
+            project.name = name
         if 'description' in request.data:
             project.description = request.data['description'] or None
         project.save()
@@ -126,26 +140,10 @@ class TaskListCreateView(APIView):
             return Response({'error': 'forbidden'}, status=status.HTTP_403_FORBIDDEN)
 
         q = request.query_params.get('q')
+        tasks = Task.objects.filter(project_id=project_id).select_related('assignee')
         if q:
-            with connection.cursor() as cursor:
-                sql = (
-                    f"SELECT id, project_id, title, description, status, assignee_id, created_by_id, position, created_at, updated_at "
-                    f"FROM tasks "
-                    f"WHERE project_id = '{project_id}' "
-                    f"AND (title ILIKE '%{q}%' OR description ILIKE '%{q}%') "
-                    f"ORDER BY position ASC"
-                )
-                cursor.execute(sql)
-                columns = [col[0] for col in cursor.description]
-                rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
-            return Response({'tasks': rows})
-
-        tasks = (
-            Task.objects
-            .filter(project_id=project_id)
-            .select_related('assignee')
-            .order_by('status', 'position')
-        )
+            tasks = tasks.filter(Q(title__icontains=q) | Q(description__icontains=q))
+        tasks = tasks.order_by('status', 'position')
         return Response({'tasks': TaskSerializer(tasks, many=True).data})
 
     def post(self, request, project_id):
@@ -163,6 +161,10 @@ class TaskListCreateView(APIView):
         if task_status not in ('todo', 'in_progress', 'review', 'done'):
             return Response({'error': 'invalid status'}, status=status.HTTP_400_BAD_REQUEST)
 
+        ok, assignee_id = _resolve_assignee_id(project_id, request.data.get('assigneeId'))
+        if not ok:
+            return Response({'error': assignee_id}, status=status.HTTP_400_BAD_REQUEST)
+
         last = Task.objects.filter(project_id=project_id, status=task_status).order_by('-position').first()
         position = (last.position + 1) if last else 0
 
@@ -172,7 +174,7 @@ class TaskListCreateView(APIView):
                 title=title,
                 description=request.data.get('description') or None,
                 status=task_status,
-                assignee_id=request.data.get('assigneeId') or None,
+                assignee_id=assignee_id,
                 created_by=request.user,
                 position=position,
             )
@@ -205,7 +207,10 @@ class TaskDetailView(APIView):
         old_assignee_id = str(task.assignee_id) if task.assignee_id else None
 
         if 'title' in request.data:
-            task.title = request.data['title'].strip()
+            title = (request.data['title'] or '').strip()
+            if not title:
+                return Response({'error': 'title is required'}, status=status.HTTP_400_BAD_REQUEST)
+            task.title = title
         if 'description' in request.data:
             task.description = request.data['description'] or None
         if 'status' in request.data:
@@ -214,7 +219,10 @@ class TaskDetailView(APIView):
                 return Response({'error': 'invalid status'}, status=status.HTTP_400_BAD_REQUEST)
             task.status = new_status
         if 'assigneeId' in request.data:
-            task.assignee_id = request.data['assigneeId'] or None
+            ok, assignee_id = _resolve_assignee_id(task.project_id, request.data.get('assigneeId'))
+            if not ok:
+                return Response({'error': assignee_id}, status=status.HTTP_400_BAD_REQUEST)
+            task.assignee_id = assignee_id
 
         new_assignee_id = str(task.assignee_id) if task.assignee_id else None
 
@@ -356,5 +364,8 @@ class ExportView(APIView):
         tasks = list(
             Task.objects.filter(project_id=project_id).select_related('assignee', 'created_by')
         )
-        result = export_tasks_to_airtable(tasks, project_id=str(project_id))
+        try:
+            result = export_tasks_to_airtable(tasks, project_id=str(project_id))
+        except PermanentAirtableError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
         return Response(result)

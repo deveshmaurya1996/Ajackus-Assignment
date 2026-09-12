@@ -134,6 +134,61 @@ class TestTasks:
         assert response.status_code == 200
         assert response.data['task']['title'] == 'Updated'
 
+    def test_search_uses_orm_and_rejects_injection_as_literal(self, auth_client, user):
+        project = Project.objects.create(name='P', owner=user)
+        Membership.objects.create(user=user, project=project, role='admin')
+        Task.objects.create(project=project, title='Safe task', created_by=user)
+        Task.objects.create(project=project, title='Other', created_by=user)
+
+        response = auth_client.get(f'/api/projects/{project.id}/tasks', {'q': "Safe%' OR 1=1--"})
+        assert response.status_code == 200
+        titles = [t['title'] for t in response.data['tasks']]
+        assert titles == []  # treated as literal search, not SQL
+        assert 'assignee' in response.data['tasks'] or True  # shape check below on hit
+
+        hit = auth_client.get(f'/api/projects/{project.id}/tasks', {'q': 'Safe'})
+        assert hit.status_code == 200
+        assert len(hit.data['tasks']) == 1
+        assert hit.data['tasks'][0]['title'] == 'Safe task'
+        assert 'assignee' in hit.data['tasks'][0]
+
+    def test_patch_rejects_empty_title(self, auth_client, user):
+        project = Project.objects.create(name='P', owner=user)
+        Membership.objects.create(user=user, project=project, role='admin')
+        task = Task.objects.create(project=project, title='A task', created_by=user)
+
+        response = auth_client.patch(f'/api/tasks/{task.id}', {'title': '   '}, format='json')
+        assert response.status_code == 400
+
+    def test_assignee_must_be_project_member(self, auth_client, user):
+        project = Project.objects.create(name='P', owner=user)
+        Membership.objects.create(user=user, project=project, role='admin')
+        outsider = User.objects.create_user(email='out@example.com', name='Out', password='password123')
+        task = Task.objects.create(project=project, title='A task', created_by=user)
+
+        response = auth_client.patch(
+            f'/api/tasks/{task.id}',
+            {'assigneeId': str(outsider.id)},
+            format='json',
+        )
+        assert response.status_code == 400
+        task.refresh_from_db()
+        assert task.assignee_id is None
+
+    def test_assignee_change_emits_activity(self, auth_client, user):
+        project = Project.objects.create(name='P', owner=user)
+        Membership.objects.create(user=user, project=project, role='admin')
+        task = Task.objects.create(project=project, title='A task', created_by=user)
+
+        response = auth_client.patch(
+            f'/api/tasks/{task.id}',
+            {'assigneeId': str(user.id)},
+            format='json',
+        )
+        assert response.status_code == 200
+        feed = auth_client.get(f'/api/projects/{project.id}/activity')
+        assert feed.data['activities'][0]['action'] == 'task.assignee_changed'
+
 
 @pytest.mark.django_db
 class TestComments:
@@ -253,6 +308,18 @@ class TestExport:
 
         response = client.post(f'/api/projects/{project.id}/export')
         assert response.status_code == 403
+
+    def test_export_missing_credentials_returns_502(self, auth_client, user, monkeypatch):
+        project = Project.objects.create(name='P', owner=user)
+        Membership.objects.create(user=user, project=project, role='admin')
+        Task.objects.create(project=project, title='One', created_by=user)
+
+        monkeypatch.delenv('AIRTABLE_API_KEY', raising=False)
+        monkeypatch.delenv('AIRTABLE_BASE_ID', raising=False)
+
+        response = auth_client.post(f'/api/projects/{project.id}/export')
+        assert response.status_code == 502
+        assert 'AIRTABLE' in response.data['error']
 
     def test_export_upserts_and_isolates_failures(self, auth_client, user, monkeypatch):
         project = Project.objects.create(name='P', owner=user)

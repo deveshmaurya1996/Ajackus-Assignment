@@ -33,14 +33,19 @@ export async function apiFetch<T>(path: string, options: RequestInit = {}): Prom
   const token = getToken();
   const headers = new Headers(options.headers);
   headers.set("Content-Type", "application/json");
-  if (token) headers.set("Authorization", `Bearer ${token}`);
+  const isAuthEndpoint = path.startsWith("/api/auth/login") || path.startsWith("/api/auth/register");
+  if (token && !isAuthEndpoint) {
+    headers.set("Authorization", `Bearer ${token}`);
+  }
 
   const res = await fetch(path, { ...options, headers });
   const text = await res.text();
   const data = text ? JSON.parse(text) : null;
 
   if (!res.ok) {
-    const message = (data && (data.error as string)) || `request failed (${res.status})`;
+    const message =
+      (data && ((data.error as string) || (data.detail as string))) ||
+      `request failed (${res.status})`;
     throw new Error(message);
   }
   return data as T;
