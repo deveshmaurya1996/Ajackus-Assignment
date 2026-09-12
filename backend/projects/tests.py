@@ -97,3 +97,39 @@ class TestTasks:
 
         response = client.delete(f'/api/tasks/{task.id}')
         assert response.status_code == 403
+
+    def test_non_member_cannot_patch_task(self, client, user):
+        owner = User.objects.create_user(email='owner@example.com', name='Owner', password='password123')
+        project = Project.objects.create(name='P', owner=owner)
+        Membership.objects.create(user=owner, project=project, role='admin')
+        task = Task.objects.create(project=project, title='A task', created_by=owner)
+
+        resp = client.post('/api/auth/login', {'email': 'meera@taskboard.dev', 'password': 'password123'}, format='json')
+        client.credentials(HTTP_AUTHORIZATION=f"Bearer {resp.data['token']}")
+
+        response = client.patch(f'/api/tasks/{task.id}', {'title': 'Hacked'}, format='json')
+        assert response.status_code == 403
+        task.refresh_from_db()
+        assert task.title == 'A task'
+
+    def test_viewer_cannot_patch_task(self, client, user):
+        owner = User.objects.create_user(email='owner@example.com', name='Owner', password='password123')
+        project = Project.objects.create(name='P', owner=owner)
+        Membership.objects.create(user=owner, project=project, role='admin')
+        Membership.objects.create(user=user, project=project, role='viewer')
+        task = Task.objects.create(project=project, title='A task', created_by=owner)
+
+        resp = client.post('/api/auth/login', {'email': 'meera@taskboard.dev', 'password': 'password123'}, format='json')
+        client.credentials(HTTP_AUTHORIZATION=f"Bearer {resp.data['token']}")
+
+        response = client.patch(f'/api/tasks/{task.id}', {'title': 'Viewer edit'}, format='json')
+        assert response.status_code == 403
+
+    def test_member_can_patch_task(self, auth_client, user):
+        project = Project.objects.create(name='P', owner=user)
+        Membership.objects.create(user=user, project=project, role='member')
+        task = Task.objects.create(project=project, title='A task', created_by=user)
+
+        response = auth_client.patch(f'/api/tasks/{task.id}', {'title': 'Updated'}, format='json')
+        assert response.status_code == 200
+        assert response.data['task']['title'] == 'Updated'
