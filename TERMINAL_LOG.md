@@ -128,11 +128,17 @@ curl -s -X POST http://localhost:8000/api/projects/<project_id>/export \
 
 UI: **export to Airtable** on the project detail page (admin/member only).
 
-**Live demo status:** pending your Airtable PAT + Base ID in `.env`. Paste screenshot or share link here once run:
+**Live demo (full schema):**
 
-- First export: _TODO_
-- Second export (upsert): _TODO_
-- Airtable share link / screenshot: _TODO_
+```text
+EXPORT 1 → {"exported":7,"created":7,"updated":0,"failed":0,"errors":[]}  HTTP 200
+EXPORT 2 → {"exported":7,"created":0,"updated":7,"failed":0,"errors":[]}  HTTP 200
+Sample fields: Task Id, Title, Description, Status, Assignee, Project Id, Position
+```
+
+Open the Airtable **Tasks** base to verify rows. Paste a share link or screenshot path here if submitting:
+
+- Airtable share link / screenshot: _add if required_
 
 ---
 
@@ -140,7 +146,7 @@ UI: **export to Airtable** on the project detail page (admin/member only).
 
 ```text
 docker compose exec backend python -m pytest
-# 28 passed
+# 33 passed
 
 docker compose exec frontend npm test
 # Test Files  2 passed (2)
@@ -156,4 +162,5 @@ docs: add REVIEW.md with prioritized findings and curl proof
 fix: require membership and edit role on task PATCH
 feat: comments, activity feed, and Airtable export
 docs: TERMINAL_LOG, RECORDING placeholder, README API updates
+fix: harden authz, search, Airtable schema checks, and stale JWT login
 ```

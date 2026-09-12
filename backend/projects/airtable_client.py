@@ -12,23 +12,12 @@ TRANSIENT_STATUS = {429, 500, 502, 503, 504}
 MAX_RETRIES = 3
 BACKOFF_SECONDS = 0.5
 
-REQUIRED_FIELDS = (
-    'Task Id',
-    'Title',
-    'Description',
-    'Status',
-    'Assignee',
-    'Project Id',
-    'Position',
+MISSING_SCHEMA_MSG = (
+    'Airtable table is missing required columns. Create exactly: '
+    'Task Id, Title, Description, Status, Assignee, Project Id, Position '
+    '(see AIRTABLE_SETUP.md).'
 )
 
-MISSING_SCHEMA_MSG = (
-    'Airtable table is missing required columns. In your Tasks table create these '
-    'exact field names: Task Id (single line text), Title (single line text), '
-    'Description (long text), Status (single line text), Assignee (single line text), '
-    'Project Id (single line text), Position (number). '
-    'Optional: add schema.bases:read and schema.bases:write to your PAT.'
-)
 
 
 class PermanentAirtableError(Exception):
