@@ -1,32 +1,51 @@
-import { useState } from "react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { apiFetch } from "@/lib/api-client";
-import type { ApiTask, ApiProjectMember, TaskStatus } from "@/types";
+import { useEffect, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { apiFetch, getStoredUser } from "@/lib/api-client";
+import type { ApiTask, ApiProjectMember, TaskStatus, Role, ApiComment } from "@/types";
 import { STATUS_LABELS, STATUS_ORDER } from "@/types";
 
 type Props = {
   task: ApiTask;
   projectId: string;
   members: ApiProjectMember[];
+  myRole?: Role;
   onClose: () => void;
 };
 
-export function TaskDetail({ task, projectId, members, onClose }: Props) {
+function resolveAssigneeId(task: ApiTask): string {
+  return task.assigneeId ?? task.assignee_id ?? task.assignee?.id ?? "";
+}
+
+export function TaskDetail({ task, projectId, members, myRole, onClose }: Props) {
   const queryClient = useQueryClient();
+  const me = getStoredUser();
+  const role =
+    myRole ??
+    members.find((m) => m.user.id === me?.id)?.role ??
+    "viewer";
+  const canPost = role === "admin" || role === "member";
+
   const [title, setTitle] = useState(task.title);
   const [description, setDescription] = useState(task.description ?? "");
   const [status, setStatus] = useState<TaskStatus>(task.status);
-  const [assigneeId, setAssigneeId] = useState<string>(task.assigneeId ?? "");
+  const [assigneeId, setAssigneeId] = useState<string>(resolveAssigneeId(task));
+  const [commentBody, setCommentBody] = useState("");
   const [error, setError] = useState<string | null>(null);
 
+  const { data: commentsData } = useQuery({
+    queryKey: ["comments", task.id],
+    queryFn: () => apiFetch<{ comments: ApiComment[] }>(`/api/tasks/${task.id}/comments`),
+  });
+
   const updateTask = useMutation({
-    mutationFn: (input: Partial<ApiTask>) =>
+    mutationFn: (input: Record<string, unknown>) =>
       apiFetch<{ task: ApiTask }>(`/api/tasks/${task.id}`, {
         method: "PATCH",
         body: JSON.stringify(input),
       }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["project", projectId] });
+      queryClient.invalidateQueries({ queryKey: ["activity", projectId] });
       onClose();
     },
     onError: (err) => setError(err instanceof Error ? err.message : "save failed"),
@@ -37,10 +56,29 @@ export function TaskDetail({ task, projectId, members, onClose }: Props) {
       apiFetch<{ ok: true }>(`/api/tasks/${task.id}`, { method: "DELETE" }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["project", projectId] });
+      queryClient.invalidateQueries({ queryKey: ["activity", projectId] });
       onClose();
     },
     onError: (err) => setError(err instanceof Error ? err.message : "delete failed"),
   });
+
+  const postComment = useMutation({
+    mutationFn: (body: string) =>
+      apiFetch<{ comment: ApiComment }>(`/api/tasks/${task.id}/comments`, {
+        method: "POST",
+        body: JSON.stringify({ body }),
+      }),
+    onSuccess: () => {
+      setCommentBody("");
+      queryClient.invalidateQueries({ queryKey: ["comments", task.id] });
+      queryClient.invalidateQueries({ queryKey: ["activity", projectId] });
+    },
+    onError: (err) => setError(err instanceof Error ? err.message : "comment failed"),
+  });
+
+  useEffect(() => {
+    setAssigneeId(resolveAssigneeId(task));
+  }, [task]);
 
   function onSave() {
     setError(null);
@@ -52,13 +90,15 @@ export function TaskDetail({ task, projectId, members, onClose }: Props) {
     });
   }
 
+  const comments = commentsData?.comments ?? [];
+
   return (
     <div
       className="fixed inset-0 bg-black/60 flex items-center justify-center px-4 z-50"
       onClick={onClose}
     >
       <div
-        className="w-full max-w-xl bg-surface border border-border rounded-lg p-6"
+        className="w-full max-w-xl bg-surface border border-border rounded-lg p-6 max-h-[90vh] overflow-y-auto"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between mb-4">
@@ -121,6 +161,54 @@ export function TaskDetail({ task, projectId, members, onClose }: Props) {
           </label>
         </div>
 
+        <section className="mb-4 border-t border-border pt-4">
+          <h3 className="text-sm font-medium mb-3">comments</h3>
+          <ul className="space-y-3 mb-3 max-h-48 overflow-y-auto">
+            {comments.length === 0 && (
+              <li className="text-xs text-muted">no comments yet</li>
+            )}
+            {comments.map((c) => (
+              <li key={c.id} className="text-sm bg-bg border border-border rounded-md px-3 py-2">
+                <div className="flex items-center justify-between gap-2 mb-1">
+                  <span className="font-medium text-xs">{c.author.name}</span>
+                  <span className="text-[10px] text-muted">
+                    {new Date(c.createdAt).toLocaleString()}
+                  </span>
+                </div>
+                <p className="text-sm whitespace-pre-wrap">{c.body}</p>
+              </li>
+            ))}
+          </ul>
+          {canPost ? (
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                if (!commentBody.trim()) return;
+                setError(null);
+                postComment.mutate(commentBody.trim());
+              }}
+              className="flex gap-2"
+            >
+              <input
+                type="text"
+                value={commentBody}
+                onChange={(e) => setCommentBody(e.target.value)}
+                placeholder="add a comment"
+                className="flex-1 rounded-md bg-bg border border-border px-3 py-2 text-sm focus:border-accent focus:outline-none"
+              />
+              <button
+                type="submit"
+                disabled={postComment.isPending}
+                className="bg-accent hover:bg-indigo-500 text-white text-sm font-medium rounded-md px-3 disabled:opacity-50"
+              >
+                post
+              </button>
+            </form>
+          ) : (
+            <p className="text-xs text-muted">viewers can read comments but cannot post</p>
+          )}
+        </section>
+
         {error && (
           <p className="text-sm text-red-400 mb-3" role="alert">
             {error}
@@ -130,8 +218,8 @@ export function TaskDetail({ task, projectId, members, onClose }: Props) {
         <div className="flex items-center justify-between gap-3">
           <button
             onClick={() => deleteTask.mutate()}
-            disabled={deleteTask.isPending}
-            className="text-sm text-red-400 hover:text-red-300"
+            disabled={deleteTask.isPending || !canPost}
+            className="text-sm text-red-400 hover:text-red-300 disabled:opacity-40"
           >
             delete task
           </button>
@@ -144,7 +232,7 @@ export function TaskDetail({ task, projectId, members, onClose }: Props) {
             </button>
             <button
               onClick={onSave}
-              disabled={updateTask.isPending}
+              disabled={updateTask.isPending || !canPost}
               className="text-sm px-4 py-2 rounded-md bg-accent text-white hover:bg-indigo-500 disabled:opacity-50"
             >
               {updateTask.isPending ? "saving…" : "save"}

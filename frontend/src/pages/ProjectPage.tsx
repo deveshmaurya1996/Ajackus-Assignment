@@ -5,8 +5,8 @@ import { apiFetch, getToken } from "@/lib/api-client";
 import { Header } from "@/components/Header";
 import { StatusColumn } from "@/components/StatusColumn";
 import { TaskDetail } from "@/components/TaskDetail";
-import type { ApiProjectDetail, ApiTask, TaskStatus } from "@/types";
-import { STATUS_ORDER } from "@/types";
+import type { ApiActivity, ApiProjectDetail, ApiTask, TaskStatus } from "@/types";
+import { STATUS_ORDER, formatActivity } from "@/types";
 
 export default function ProjectPage() {
   const navigate = useNavigate();
@@ -17,6 +17,7 @@ export default function ProjectPage() {
   const [newTitle, setNewTitle] = useState("");
   const [newColumn, setNewColumn] = useState<TaskStatus>("todo");
   const [error, setError] = useState<string | null>(null);
+  const [exportMsg, setExportMsg] = useState<string | null>(null);
 
   useEffect(() => {
     if (!getToken()) navigate("/login", { replace: true });
@@ -25,6 +26,12 @@ export default function ProjectPage() {
   const { data, isLoading, error: queryError } = useQuery({
     queryKey: ["project", id],
     queryFn: () => apiFetch<{ project: ApiProjectDetail }>(`/api/projects/${id}`),
+  });
+
+  const { data: activityData } = useQuery({
+    queryKey: ["activity", id],
+    queryFn: () => apiFetch<{ activities: ApiActivity[] }>(`/api/projects/${id}/activity`),
+    enabled: !!id,
   });
 
   const createTask = useMutation({
@@ -36,11 +43,31 @@ export default function ProjectPage() {
     onSuccess: () => {
       setNewTitle("");
       queryClient.invalidateQueries({ queryKey: ["project", id] });
+      queryClient.invalidateQueries({ queryKey: ["activity", id] });
     },
     onError: (err) => setError(err instanceof Error ? err.message : "create failed"),
   });
 
+  const exportTasks = useMutation({
+    mutationFn: () =>
+      apiFetch<{
+        exported: number;
+        created: number;
+        updated: number;
+        failed: number;
+      }>(`/api/projects/${id}/export`, { method: "POST" }),
+    onSuccess: (res) => {
+      setExportMsg(
+        `exported ${res.exported} (created ${res.created}, updated ${res.updated}, failed ${res.failed})`,
+      );
+    },
+    onError: (err) => setExportMsg(err instanceof Error ? err.message : "export failed"),
+  });
+
   const project = data?.project;
+  const myRole = project?.myRole;
+  const canEdit = myRole === "admin" || myRole === "member";
+
   const tasksByStatus: Record<TaskStatus, ApiTask[]> = {
     todo: [],
     in_progress: [],
@@ -74,7 +101,7 @@ export default function ProjectPage() {
 
         {project && (
           <>
-            <div className="flex items-start justify-between mt-4 mb-8">
+            <div className="flex items-start justify-between mt-4 mb-8 gap-4">
               <div>
                 <h1 className="text-2xl font-semibold">{project.name}</h1>
                 {project.description && (
@@ -84,53 +111,74 @@ export default function ProjectPage() {
                 )}
                 <p className="text-xs text-muted mt-2">
                   owner: {project.owner.name} · {project.memberships.length} members
+                  {myRole ? ` · you: ${myRole}` : ""}
                 </p>
               </div>
+              {canEdit && (
+                <div className="shrink-0 text-right">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setExportMsg(null);
+                      exportTasks.mutate();
+                    }}
+                    disabled={exportTasks.isPending}
+                    className="bg-accent hover:bg-indigo-500 text-white text-sm font-medium rounded-md px-4 py-2 disabled:opacity-50"
+                  >
+                    {exportTasks.isPending ? "exporting…" : "export to Airtable"}
+                  </button>
+                  {exportMsg && (
+                    <p className="text-xs text-muted mt-2 max-w-xs">{exportMsg}</p>
+                  )}
+                </div>
+              )}
             </div>
 
-            <section className="bg-surface border border-border rounded-lg p-4 mb-6">
-              <h2 className="text-sm font-medium mb-3">add a task</h2>
-              <form
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  if (!newTitle.trim()) return;
-                  setError(null);
-                  createTask.mutate({ title: newTitle.trim(), status: newColumn });
-                }}
-                className="flex gap-2"
-              >
-                <input
-                  type="text"
-                  value={newTitle}
-                  onChange={(e) => setNewTitle(e.target.value)}
-                  placeholder="task title"
-                  className="flex-1 rounded-md bg-bg border border-border px-3 py-2 text-sm focus:border-accent focus:outline-none"
-                />
-                <select
-                  value={newColumn}
-                  onChange={(e) => setNewColumn(e.target.value as TaskStatus)}
-                  className="rounded-md bg-bg border border-border px-3 py-2 text-sm focus:border-accent focus:outline-none"
+            {canEdit && (
+              <section className="bg-surface border border-border rounded-lg p-4 mb-6">
+                <h2 className="text-sm font-medium mb-3">add a task</h2>
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    if (!newTitle.trim()) return;
+                    setError(null);
+                    createTask.mutate({ title: newTitle.trim(), status: newColumn });
+                  }}
+                  className="flex gap-2"
                 >
-                  {STATUS_ORDER.map((s) => (
-                    <option key={s} value={s}>
-                      {s}
-                    </option>
-                  ))}
-                </select>
-                <button
-                  type="submit"
-                  disabled={createTask.isPending}
-                  className="bg-accent hover:bg-indigo-500 text-white text-sm font-medium rounded-md px-4 disabled:opacity-50"
-                >
-                  add
-                </button>
-              </form>
-              {error && (
-                <p className="text-sm text-red-400 mt-2" role="alert">
-                  {error}
-                </p>
-              )}
-            </section>
+                  <input
+                    type="text"
+                    value={newTitle}
+                    onChange={(e) => setNewTitle(e.target.value)}
+                    placeholder="task title"
+                    className="flex-1 rounded-md bg-bg border border-border px-3 py-2 text-sm focus:border-accent focus:outline-none"
+                  />
+                  <select
+                    value={newColumn}
+                    onChange={(e) => setNewColumn(e.target.value as TaskStatus)}
+                    className="rounded-md bg-bg border border-border px-3 py-2 text-sm focus:border-accent focus:outline-none"
+                  >
+                    {STATUS_ORDER.map((s) => (
+                      <option key={s} value={s}>
+                        {s}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    type="submit"
+                    disabled={createTask.isPending}
+                    className="bg-accent hover:bg-indigo-500 text-white text-sm font-medium rounded-md px-4 disabled:opacity-50"
+                  >
+                    add
+                  </button>
+                </form>
+                {error && (
+                  <p className="text-sm text-red-400 mt-2" role="alert">
+                    {error}
+                  </p>
+                )}
+              </section>
+            )}
 
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
               {STATUS_ORDER.map((s) => (
@@ -142,6 +190,23 @@ export default function ProjectPage() {
                 />
               ))}
             </div>
+
+            <section className="mt-10">
+              <h2 className="text-sm font-medium mb-3">recent activity</h2>
+              <ul className="bg-surface border border-border rounded-lg divide-y divide-border">
+                {(activityData?.activities ?? []).length === 0 && (
+                  <li className="px-4 py-3 text-sm text-muted">no activity yet</li>
+                )}
+                {(activityData?.activities ?? []).map((a) => (
+                  <li key={a.id} className="px-4 py-3 flex items-center justify-between gap-4 text-sm">
+                    <span>{formatActivity(a)}</span>
+                    <span className="text-xs text-muted shrink-0">
+                      {new Date(a.createdAt).toLocaleString()}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </section>
 
             <section className="mt-10">
               <h2 className="text-sm font-medium mb-3">members</h2>
@@ -168,6 +233,7 @@ export default function ProjectPage() {
           task={activeTask}
           projectId={id!}
           members={project.memberships}
+          myRole={myRole}
           onClose={() => setActiveTask(null)}
         />
       )}

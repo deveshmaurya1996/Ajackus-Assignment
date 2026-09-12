@@ -133,3 +133,173 @@ class TestTasks:
         response = auth_client.patch(f'/api/tasks/{task.id}', {'title': 'Updated'}, format='json')
         assert response.status_code == 200
         assert response.data['task']['title'] == 'Updated'
+
+
+@pytest.mark.django_db
+class TestComments:
+    def test_member_can_post_and_list_chronologically(self, auth_client, user):
+        project = Project.objects.create(name='P', owner=user)
+        Membership.objects.create(user=user, project=project, role='member')
+        task = Task.objects.create(project=project, title='A task', created_by=user)
+
+        r1 = auth_client.post(f'/api/tasks/{task.id}/comments', {'body': 'first'}, format='json')
+        r2 = auth_client.post(f'/api/tasks/{task.id}/comments', {'body': 'second'}, format='json')
+        assert r1.status_code == 201
+        assert r2.status_code == 201
+
+        listed = auth_client.get(f'/api/tasks/{task.id}/comments')
+        assert listed.status_code == 200
+        bodies = [c['body'] for c in listed.data['comments']]
+        assert bodies == ['first', 'second']
+        assert listed.data['comments'][0]['author']['email'] == 'meera@taskboard.dev'
+        assert 'createdAt' in listed.data['comments'][0]
+
+    def test_viewer_can_read_but_not_post(self, client, user):
+        owner = User.objects.create_user(email='owner@example.com', name='Owner', password='password123')
+        project = Project.objects.create(name='P', owner=owner)
+        Membership.objects.create(user=owner, project=project, role='admin')
+        Membership.objects.create(user=user, project=project, role='viewer')
+        task = Task.objects.create(project=project, title='A task', created_by=owner)
+        from projects.models import Comment
+        Comment.objects.create(task=task, author=owner, body='hello')
+
+        resp = client.post('/api/auth/login', {'email': 'meera@taskboard.dev', 'password': 'password123'}, format='json')
+        client.credentials(HTTP_AUTHORIZATION=f"Bearer {resp.data['token']}")
+
+        listed = client.get(f'/api/tasks/{task.id}/comments')
+        assert listed.status_code == 200
+        assert len(listed.data['comments']) == 1
+
+        posted = client.post(f'/api/tasks/{task.id}/comments', {'body': 'nope'}, format='json')
+        assert posted.status_code == 403
+
+    def test_non_member_cannot_list_comments(self, client, user):
+        owner = User.objects.create_user(email='owner@example.com', name='Owner', password='password123')
+        project = Project.objects.create(name='P', owner=owner)
+        Membership.objects.create(user=owner, project=project, role='admin')
+        task = Task.objects.create(project=project, title='A task', created_by=owner)
+
+        resp = client.post('/api/auth/login', {'email': 'meera@taskboard.dev', 'password': 'password123'}, format='json')
+        client.credentials(HTTP_AUTHORIZATION=f"Bearer {resp.data['token']}")
+
+        listed = client.get(f'/api/tasks/{task.id}/comments')
+        assert listed.status_code == 403
+
+
+@pytest.mark.django_db
+class TestActivity:
+    def test_task_create_and_status_emit_activity(self, auth_client, user):
+        project = Project.objects.create(name='P', owner=user)
+        Membership.objects.create(user=user, project=project, role='admin')
+
+        created = auth_client.post(f'/api/projects/{project.id}/tasks', {'title': 'Ship it'}, format='json')
+        task_id = created.data['task']['id']
+        auth_client.patch(f'/api/tasks/{task_id}', {'status': 'in_progress'}, format='json')
+
+        feed = auth_client.get(f'/api/projects/{project.id}/activity')
+        assert feed.status_code == 200
+        actions = [a['action'] for a in feed.data['activities']]
+        assert actions[0] == 'task.status_changed'
+        assert 'task.created' in actions
+
+    def test_comment_emits_activity(self, auth_client, user):
+        project = Project.objects.create(name='P', owner=user)
+        Membership.objects.create(user=user, project=project, role='admin')
+        task = Task.objects.create(project=project, title='A task', created_by=user)
+
+        auth_client.post(f'/api/tasks/{task.id}/comments', {'body': 'note'}, format='json')
+        feed = auth_client.get(f'/api/projects/{project.id}/activity')
+        assert feed.data['activities'][0]['action'] == 'comment.added'
+
+    def test_non_member_cannot_read_activity(self, client, user):
+        owner = User.objects.create_user(email='owner@example.com', name='Owner', password='password123')
+        project = Project.objects.create(name='P', owner=owner)
+        Membership.objects.create(user=owner, project=project, role='admin')
+
+        resp = client.post('/api/auth/login', {'email': 'meera@taskboard.dev', 'password': 'password123'}, format='json')
+        client.credentials(HTTP_AUTHORIZATION=f"Bearer {resp.data['token']}")
+
+        feed = client.get(f'/api/projects/{project.id}/activity')
+        assert feed.status_code == 403
+
+    def test_activity_failure_rolls_back_task_change(self, auth_client, user, monkeypatch):
+        project = Project.objects.create(name='P', owner=user)
+        Membership.objects.create(user=user, project=project, role='admin')
+        task = Task.objects.create(project=project, title='A task', status='todo', created_by=user)
+
+        from projects import views as project_views
+
+        def boom(**kwargs):
+            raise RuntimeError('activity write failed')
+
+        monkeypatch.setattr(project_views, '_record_activity', boom)
+
+        with pytest.raises(RuntimeError, match='activity write failed'):
+            auth_client.patch(f'/api/tasks/{task.id}', {'status': 'done'}, format='json')
+        task.refresh_from_db()
+        assert task.status == 'todo'
+
+
+@pytest.mark.django_db
+class TestExport:
+    def test_viewer_cannot_export(self, client, user):
+        owner = User.objects.create_user(email='owner@example.com', name='Owner', password='password123')
+        project = Project.objects.create(name='P', owner=owner)
+        Membership.objects.create(user=owner, project=project, role='admin')
+        Membership.objects.create(user=user, project=project, role='viewer')
+
+        resp = client.post('/api/auth/login', {'email': 'meera@taskboard.dev', 'password': 'password123'}, format='json')
+        client.credentials(HTTP_AUTHORIZATION=f"Bearer {resp.data['token']}")
+
+        response = client.post(f'/api/projects/{project.id}/export')
+        assert response.status_code == 403
+
+    def test_export_upserts_and_isolates_failures(self, auth_client, user, monkeypatch):
+        project = Project.objects.create(name='P', owner=user)
+        Membership.objects.create(user=user, project=project, role='admin')
+        t1 = Task.objects.create(project=project, title='One', created_by=user)
+        t2 = Task.objects.create(project=project, title='Two', created_by=user)
+
+        from projects.airtable_mock import MockAirtableTable
+        from projects import airtable_client
+
+        table = MockAirtableTable(fail_task_ids={str(t2.id)})
+        monkeypatch.setattr(airtable_client, 'get_table', lambda: table)
+        monkeypatch.setattr(airtable_client.time, 'sleep', lambda *_: None)
+
+        first = auth_client.post(f'/api/projects/{project.id}/export')
+        assert first.status_code == 200
+        assert first.data['created'] == 1
+        assert first.data['failed'] == 1
+        assert str(t1.id) in table.records
+        assert str(t2.id) not in table.records
+
+        # second run updates existing record instead of duplicating
+        table.fail_task_ids.clear()
+        t1.title = 'One updated'
+        t1.save()
+        second = auth_client.post(f'/api/projects/{project.id}/export')
+        assert second.status_code == 200
+        assert second.data['updated'] >= 1
+        assert second.data['created'] >= 1
+        assert table.records[str(t1.id)]['Title'] == 'One updated'
+        assert len(table.records) == 2
+
+    def test_transient_retry_then_succeeds(self, auth_client, user, monkeypatch):
+        project = Project.objects.create(name='P', owner=user)
+        Membership.objects.create(user=user, project=project, role='admin')
+        task = Task.objects.create(project=project, title='Retry me', created_by=user)
+
+        from projects.airtable_mock import MockAirtableTable
+        from projects import airtable_client
+
+        table = MockAirtableTable(transient_then_ok_ids={str(task.id)})
+        monkeypatch.setattr(airtable_client, 'get_table', lambda: table)
+        monkeypatch.setattr(airtable_client.time, 'sleep', lambda *_: None)
+
+        response = auth_client.post(f'/api/projects/{project.id}/export')
+        assert response.status_code == 200
+        assert response.data['exported'] == 1
+        assert response.data['failed'] == 0
+        assert table.create_calls == 1
+
