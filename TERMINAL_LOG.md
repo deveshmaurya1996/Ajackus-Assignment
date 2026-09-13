@@ -136,9 +136,11 @@ EXPORT 2 → {"exported":7,"created":0,"updated":7,"failed":0,"errors":[]}  HTTP
 Sample fields: Task Id, Title, Description, Status, Assignee, Project Id, Position
 ```
 
-Open the Airtable **Tasks** base to verify rows. Paste a share link or screenshot path here if submitting:
+Open the Airtable **Tasks** base to verify rows. Proof screenshot (TaskBoard Export → Tasks grid after live export):
 
-- Airtable share link / screenshot: _add if required_
+![Airtable Tasks export](airtable-export.png)
+
+- Screenshot file: [`airtable-export.png`](airtable-export.png) (repo root, same level as `REVIEW.md`)
 
 ---
 
