@@ -27,7 +27,7 @@ services:
       POSTGRES_PASSWORD: taskboard
       POSTGRES_HOST: db
       POSTGRES_PORT: "5432"
-      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-dev-secret-change-me}
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-dev-secret-change-me-in-production-32b}
       DEBUG: "true"
       AIRTABLE_API_KEY: ${AIRTABLE_API_KEY:-}
       AIRTABLE_BASE_ID: ${AIRTABLE_BASE_ID:-}
