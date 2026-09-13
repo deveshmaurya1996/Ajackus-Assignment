@@ -1,7 +1,12 @@
 import { useEffect, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { apiFetch, getStoredUser } from "@/lib/api-client";
-import type { ApiTask, ApiProjectMember, TaskStatus, Role, ApiComment } from "@/types";
+import { getStoredUser } from "@/lib/api-client";
+import {
+  useDeleteTask,
+  usePostComment,
+  useTaskComments,
+  useUpdateTask,
+} from "@/hooks/useTask";
+import type { ApiTask, ApiProjectMember, TaskStatus, Role } from "@/types";
 import { STATUS_LABELS, STATUS_ORDER } from "@/types";
 
 type Props = {
@@ -17,7 +22,6 @@ function resolveAssigneeId(task: ApiTask): string {
 }
 
 export function TaskDetail({ task, projectId, members, myRole, onClose }: Props) {
-  const queryClient = useQueryClient();
   const me = getStoredUser();
   const role =
     myRole ??
@@ -32,48 +36,21 @@ export function TaskDetail({ task, projectId, members, myRole, onClose }: Props)
   const [commentBody, setCommentBody] = useState("");
   const [error, setError] = useState<string | null>(null);
 
-  const { data: commentsData } = useQuery({
-    queryKey: ["comments", task.id],
-    queryFn: () => apiFetch<{ comments: ApiComment[] }>(`/api/tasks/${task.id}/comments`),
+  const { data: commentsData } = useTaskComments(task.id);
+
+  const updateTask = useUpdateTask(task.id, projectId, {
+    onSuccess: onClose,
+    onError: (message) => setError(message),
   });
 
-  const updateTask = useMutation({
-    mutationFn: (input: Record<string, unknown>) =>
-      apiFetch<{ task: ApiTask }>(`/api/tasks/${task.id}`, {
-        method: "PATCH",
-        body: JSON.stringify(input),
-      }),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["project", projectId] });
-      queryClient.invalidateQueries({ queryKey: ["activity", projectId] });
-      onClose();
-    },
-    onError: (err) => setError(err instanceof Error ? err.message : "save failed"),
+  const deleteTask = useDeleteTask(task.id, projectId, {
+    onSuccess: onClose,
+    onError: (message) => setError(message),
   });
 
-  const deleteTask = useMutation({
-    mutationFn: () =>
-      apiFetch<{ ok: true }>(`/api/tasks/${task.id}`, { method: "DELETE" }),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["project", projectId] });
-      queryClient.invalidateQueries({ queryKey: ["activity", projectId] });
-      onClose();
-    },
-    onError: (err) => setError(err instanceof Error ? err.message : "delete failed"),
-  });
-
-  const postComment = useMutation({
-    mutationFn: (body: string) =>
-      apiFetch<{ comment: ApiComment }>(`/api/tasks/${task.id}/comments`, {
-        method: "POST",
-        body: JSON.stringify({ body }),
-      }),
-    onSuccess: () => {
-      setCommentBody("");
-      queryClient.invalidateQueries({ queryKey: ["comments", task.id] });
-      queryClient.invalidateQueries({ queryKey: ["activity", projectId] });
-    },
-    onError: (err) => setError(err instanceof Error ? err.message : "comment failed"),
+  const postComment = usePostComment(task.id, projectId, {
+    onSuccess: () => setCommentBody(""),
+    onError: (message) => setError(message),
   });
 
   useEffect(() => {

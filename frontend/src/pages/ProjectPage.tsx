@@ -1,17 +1,21 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { apiFetch, getToken } from "@/lib/api-client";
+import { getToken } from "@/lib/api-client";
 import { Header } from "@/components/Header";
 import { StatusColumn } from "@/components/StatusColumn";
 import { TaskDetail } from "@/components/TaskDetail";
-import type { ApiActivity, ApiProjectDetail, ApiTask, TaskStatus } from "@/types";
+import {
+  useCreateTask,
+  useExportTasks,
+  useProject,
+  useProjectActivity,
+} from "@/hooks/useProject";
+import type { ApiTask, TaskStatus } from "@/types";
 import { STATUS_ORDER, formatActivity } from "@/types";
 
 export default function ProjectPage() {
   const navigate = useNavigate();
   const { id } = useParams<{ id: string }>();
-  const queryClient = useQueryClient();
 
   const [activeTask, setActiveTask] = useState<ApiTask | null>(null);
   const [newTitle, setNewTitle] = useState("");
@@ -23,45 +27,20 @@ export default function ProjectPage() {
     if (!getToken()) navigate("/login", { replace: true });
   }, [navigate]);
 
-  const { data, isLoading, error: queryError } = useQuery({
-    queryKey: ["project", id],
-    queryFn: () => apiFetch<{ project: ApiProjectDetail }>(`/api/projects/${id}`),
+  const { data, isLoading, error: queryError } = useProject(id);
+  const { data: activityData } = useProjectActivity(id);
+
+  const createTask = useCreateTask(id, {
+    onSuccess: () => setNewTitle(""),
+    onError: (message) => setError(message),
   });
 
-  const { data: activityData } = useQuery({
-    queryKey: ["activity", id],
-    queryFn: () => apiFetch<{ activities: ApiActivity[] }>(`/api/projects/${id}/activity`),
-    enabled: !!id,
-  });
-
-  const createTask = useMutation({
-    mutationFn: (input: { title: string; status: TaskStatus }) =>
-      apiFetch<{ task: ApiTask }>(`/api/projects/${id}/tasks`, {
-        method: "POST",
-        body: JSON.stringify(input),
-      }),
-    onSuccess: () => {
-      setNewTitle("");
-      queryClient.invalidateQueries({ queryKey: ["project", id] });
-      queryClient.invalidateQueries({ queryKey: ["activity", id] });
-    },
-    onError: (err) => setError(err instanceof Error ? err.message : "create failed"),
-  });
-
-  const exportTasks = useMutation({
-    mutationFn: () =>
-      apiFetch<{
-        exported: number;
-        created: number;
-        updated: number;
-        failed: number;
-      }>(`/api/projects/${id}/export`, { method: "POST" }),
-    onSuccess: (res) => {
+  const exportTasks = useExportTasks(id, {
+    onSuccess: (res) =>
       setExportMsg(
         `exported ${res.exported} (created ${res.created}, updated ${res.updated}, failed ${res.failed})`,
-      );
-    },
-    onError: (err) => setExportMsg(err instanceof Error ? err.message : "export failed"),
+      ),
+    onError: (message) => setExportMsg(message),
   });
 
   const project = data?.project;

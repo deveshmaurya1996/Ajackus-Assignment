@@ -1,30 +1,16 @@
 import { useEffect } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
-import { apiFetch, getToken } from "@/lib/api-client";
+import { getToken } from "@/lib/api-client";
 import { Header } from "@/components/Header";
-
-type ProjectSummary = {
-  id: string;
-  name: string;
-  description: string | null;
-  role: "admin" | "member" | "viewer";
-  owner: { id: string; name: string; email: string };
-  taskCount: number;
-  createdAt: string;
-};
+import { useProjects } from "@/hooks/useProjects";
 
 export default function DashboardPage() {
   const navigate = useNavigate();
+  const { data, isLoading, error } = useProjects();
 
   useEffect(() => {
     if (!getToken()) navigate("/login", { replace: true });
   }, [navigate]);
-
-  const { data, isLoading, error } = useQuery({
-    queryKey: ["projects"],
-    queryFn: () => apiFetch<{ projects: ProjectSummary[] }>("/api/projects"),
-  });
 
   return (
     <div className="min-h-screen">

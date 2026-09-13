@@ -3,6 +3,7 @@ from rest_framework.response import Response
 from rest_framework import status
 from django.db import transaction
 from django.db.models import Q
+from users.models import User as UserModel
 from users.serializers import UserSerializer
 from .models import Project, Membership, Task, Comment, Activity
 from .serializers import (
@@ -12,6 +13,9 @@ from .serializers import (
     ActivitySerializer,
 )
 from .airtable_client import PermanentAirtableError, export_tasks_to_airtable
+
+TASK_STATUSES = {c[0] for c in Task.STATUS_CHOICES}
+MEMBER_ROLES = {c[0] for c in Membership.ROLE_CHOICES}
 
 
 def _get_membership(user, project_id):
@@ -23,6 +27,42 @@ def _get_membership(user, project_id):
 
 def _can_edit_tasks(role):
     return role in ('admin', 'member')
+
+
+def _require_membership(user, project_id):
+    membership = _get_membership(user, project_id)
+    if not membership:
+        return None, Response({'error': 'forbidden'}, status=status.HTTP_403_FORBIDDEN)
+    return membership, None
+
+
+def _require_editor(user, project_id, forbidden_message):
+    membership, err = _require_membership(user, project_id)
+    if err:
+        return None, err
+    if not _can_edit_tasks(membership.role):
+        return None, Response({'error': forbidden_message}, status=status.HTTP_403_FORBIDDEN)
+    return membership, None
+
+
+def _require_admin(user, project_id, forbidden_message):
+    membership, err = _require_membership(user, project_id)
+    if err:
+        return None, err
+    if membership.role != 'admin':
+        return None, Response({'error': forbidden_message}, status=status.HTTP_403_FORBIDDEN)
+    return membership, None
+
+
+def _get_task_with_membership(user, task_id):
+    try:
+        task = Task.objects.select_related('project').get(id=task_id)
+    except Task.DoesNotExist:
+        return None, None, Response({'error': 'not found'}, status=status.HTTP_404_NOT_FOUND)
+    membership, err = _require_membership(user, str(task.project_id))
+    if err:
+        return None, None, err
+    return task, membership, None
 
 
 def _record_activity(*, project_id, actor, action, task=None, metadata=None):
@@ -44,7 +84,6 @@ def _resolve_assignee_id(project_id, assignee_id):
     return True, assignee_id
 
 
-
 class ProjectListCreateView(APIView):
     def get(self, request):
         memberships = (
@@ -63,7 +102,7 @@ class ProjectListCreateView(APIView):
                 'description': p.description,
                 'role': m.role,
                 'owner': UserSerializer(p.owner).data,
-                'taskCount': p.tasks.count(),
+                'taskCount': len(p.tasks.all()),
                 'createdAt': p.created_at.isoformat(),
             })
         return Response({'projects': projects})
@@ -83,9 +122,9 @@ class ProjectListCreateView(APIView):
 
 class ProjectDetailView(APIView):
     def get(self, request, project_id):
-        membership = _get_membership(request.user, project_id)
-        if not membership:
-            return Response({'error': 'forbidden'}, status=status.HTTP_403_FORBIDDEN)
+        membership, err = _require_membership(request.user, project_id)
+        if err:
+            return err
         try:
             project = (
                 Project.objects
@@ -100,11 +139,9 @@ class ProjectDetailView(APIView):
         return Response({'project': data})
 
     def patch(self, request, project_id):
-        membership = _get_membership(request.user, project_id)
-        if not membership:
-            return Response({'error': 'forbidden'}, status=status.HTTP_403_FORBIDDEN)
-        if membership.role != 'admin':
-            return Response({'error': 'only admins can update projects'}, status=status.HTTP_403_FORBIDDEN)
+        _, err = _require_admin(request.user, project_id, 'only admins can update projects')
+        if err:
+            return err
         try:
             project = Project.objects.get(id=project_id)
         except Project.DoesNotExist:
@@ -120,11 +157,9 @@ class ProjectDetailView(APIView):
         return Response({'project': {'id': str(project.id), 'name': project.name}})
 
     def delete(self, request, project_id):
-        membership = _get_membership(request.user, project_id)
-        if not membership:
-            return Response({'error': 'forbidden'}, status=status.HTTP_403_FORBIDDEN)
-        if membership.role != 'admin':
-            return Response({'error': 'only admins can delete projects'}, status=status.HTTP_403_FORBIDDEN)
+        _, err = _require_admin(request.user, project_id, 'only admins can delete projects')
+        if err:
+            return err
         try:
             project = Project.objects.get(id=project_id)
         except Project.DoesNotExist:
@@ -135,9 +170,9 @@ class ProjectDetailView(APIView):
 
 class TaskListCreateView(APIView):
     def get(self, request, project_id):
-        membership = _get_membership(request.user, project_id)
-        if not membership:
-            return Response({'error': 'forbidden'}, status=status.HTTP_403_FORBIDDEN)
+        _, err = _require_membership(request.user, project_id)
+        if err:
+            return err
 
         q = request.query_params.get('q')
         tasks = Task.objects.filter(project_id=project_id).select_related('assignee')
@@ -147,18 +182,16 @@ class TaskListCreateView(APIView):
         return Response({'tasks': TaskSerializer(tasks, many=True).data})
 
     def post(self, request, project_id):
-        membership = _get_membership(request.user, project_id)
-        if not membership:
-            return Response({'error': 'forbidden'}, status=status.HTTP_403_FORBIDDEN)
-        if not _can_edit_tasks(membership.role):
-            return Response({'error': 'viewers cannot create tasks'}, status=status.HTTP_403_FORBIDDEN)
+        _, err = _require_editor(request.user, project_id, 'viewers cannot create tasks')
+        if err:
+            return err
 
         title = (request.data.get('title') or '').strip()
         if not title:
             return Response({'error': 'title is required'}, status=status.HTTP_400_BAD_REQUEST)
 
         task_status = request.data.get('status', 'todo')
-        if task_status not in ('todo', 'in_progress', 'review', 'done'):
+        if task_status not in TASK_STATUSES:
             return Response({'error': 'invalid status'}, status=status.HTTP_400_BAD_REQUEST)
 
         ok, assignee_id = _resolve_assignee_id(project_id, request.data.get('assigneeId'))
@@ -192,14 +225,9 @@ class TaskListCreateView(APIView):
 
 class TaskDetailView(APIView):
     def patch(self, request, task_id):
-        try:
-            task = Task.objects.select_related('project').get(id=task_id)
-        except Task.DoesNotExist:
-            return Response({'error': 'not found'}, status=status.HTTP_404_NOT_FOUND)
-
-        membership = _get_membership(request.user, str(task.project_id))
-        if not membership:
-            return Response({'error': 'forbidden'}, status=status.HTTP_403_FORBIDDEN)
+        task, membership, err = _get_task_with_membership(request.user, task_id)
+        if err:
+            return err
         if not _can_edit_tasks(membership.role):
             return Response({'error': 'viewers cannot edit tasks'}, status=status.HTTP_403_FORBIDDEN)
 
@@ -215,7 +243,7 @@ class TaskDetailView(APIView):
             task.description = request.data['description'] or None
         if 'status' in request.data:
             new_status = request.data['status']
-            if new_status not in ('todo', 'in_progress', 'review', 'done'):
+            if new_status not in TASK_STATUSES:
                 return Response({'error': 'invalid status'}, status=status.HTTP_400_BAD_REQUEST)
             task.status = new_status
         if 'assigneeId' in request.data:
@@ -249,14 +277,9 @@ class TaskDetailView(APIView):
         return Response({'task': task_data})
 
     def delete(self, request, task_id):
-        try:
-            task = Task.objects.select_related('project').get(id=task_id)
-        except Task.DoesNotExist:
-            return Response({'error': 'not found'}, status=status.HTTP_404_NOT_FOUND)
-
-        membership = _get_membership(request.user, str(task.project_id))
-        if not membership:
-            return Response({'error': 'forbidden'}, status=status.HTTP_403_FORBIDDEN)
+        task, membership, err = _get_task_with_membership(request.user, task_id)
+        if err:
+            return err
         if not _can_edit_tasks(membership.role):
             return Response({'error': 'viewers cannot delete tasks'}, status=status.HTTP_403_FORBIDDEN)
 
@@ -266,27 +289,17 @@ class TaskDetailView(APIView):
 
 class CommentListCreateView(APIView):
     def get(self, request, task_id):
-        try:
-            task = Task.objects.get(id=task_id)
-        except Task.DoesNotExist:
-            return Response({'error': 'not found'}, status=status.HTTP_404_NOT_FOUND)
-
-        membership = _get_membership(request.user, str(task.project_id))
-        if not membership:
-            return Response({'error': 'forbidden'}, status=status.HTTP_403_FORBIDDEN)
+        task, _, err = _get_task_with_membership(request.user, task_id)
+        if err:
+            return err
 
         comments = Comment.objects.filter(task=task).select_related('author').order_by('created_at')
         return Response({'comments': CommentSerializer(comments, many=True).data})
 
     def post(self, request, task_id):
-        try:
-            task = Task.objects.get(id=task_id)
-        except Task.DoesNotExist:
-            return Response({'error': 'not found'}, status=status.HTTP_404_NOT_FOUND)
-
-        membership = _get_membership(request.user, str(task.project_id))
-        if not membership:
-            return Response({'error': 'forbidden'}, status=status.HTTP_403_FORBIDDEN)
+        task, membership, err = _get_task_with_membership(request.user, task_id)
+        if err:
+            return err
         if not _can_edit_tasks(membership.role):
             return Response({'error': 'viewers cannot post comments'}, status=status.HTTP_403_FORBIDDEN)
 
@@ -309,9 +322,9 @@ class CommentListCreateView(APIView):
 
 class ActivityListView(APIView):
     def get(self, request, project_id):
-        membership = _get_membership(request.user, project_id)
-        if not membership:
-            return Response({'error': 'forbidden'}, status=status.HTTP_403_FORBIDDEN)
+        _, err = _require_membership(request.user, project_id)
+        if err:
+            return err
 
         activities = (
             Activity.objects
@@ -324,18 +337,15 @@ class ActivityListView(APIView):
 
 class MemberAddView(APIView):
     def post(self, request, project_id):
-        membership = _get_membership(request.user, project_id)
-        if not membership:
-            return Response({'error': 'forbidden'}, status=status.HTTP_403_FORBIDDEN)
-        if membership.role != 'admin':
-            return Response({'error': 'only admins can add members'}, status=status.HTTP_403_FORBIDDEN)
+        _, err = _require_admin(request.user, project_id, 'only admins can add members')
+        if err:
+            return err
 
         email = (request.data.get('email') or '').strip()
         role = request.data.get('role', 'member')
-        if role not in ('admin', 'member', 'viewer'):
+        if role not in MEMBER_ROLES:
             return Response({'error': 'invalid role'}, status=status.HTTP_400_BAD_REQUEST)
 
-        from users.models import User as UserModel
         try:
             user = UserModel.objects.get(email=email)
         except UserModel.DoesNotExist:
@@ -355,11 +365,9 @@ class MemberAddView(APIView):
 
 class ExportView(APIView):
     def post(self, request, project_id):
-        membership = _get_membership(request.user, project_id)
-        if not membership:
-            return Response({'error': 'forbidden'}, status=status.HTTP_403_FORBIDDEN)
-        if not _can_edit_tasks(membership.role):
-            return Response({'error': 'only admins and members can export'}, status=status.HTTP_403_FORBIDDEN)
+        _, err = _require_editor(request.user, project_id, 'only admins and members can export')
+        if err:
+            return err
 
         tasks = list(
             Task.objects.filter(project_id=project_id).select_related('assignee', 'created_by')
